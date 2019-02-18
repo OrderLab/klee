@@ -794,7 +794,6 @@ static const char *modelledExternals[] = {
   "klee_thread_terminate",
   "klee_get_time",
   "klee_set_time",
-#if LLVM_VERSION_CODE >= LLVM_VERSION(3, 1)
   "llvm.dbg.declare",
   "llvm.dbg.value",
   "llvm.va_start",
@@ -1287,7 +1286,6 @@ int main(int argc, char **argv, char **envp) {
     SmallString<128> Path(Opts.LibraryDir);
     llvm::sys::path::append(Path, "libkleeRuntimePOSIX.bca");
     klee_message("NOTE: Using model: %s", Path.c_str());
-    mainModule = klee::linkWithLibrary(mainModule, Path.c_str());
     assert(mainModule && "unable to link with simple model");
 
     PassManager pm;
