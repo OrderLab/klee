@@ -31,13 +31,9 @@
 #include "llvm/IR/Module.h"
 
 #include "llvm/IR/LLVMContext.h"
-#else
-#include "llvm/Module.h"
-#include "llvm/Type.h"
-#include "llvm/DerivedTypes.h"
-#include "llvm/InstrTypes.h"
-#include "llvm/LLVMContext.h"
-#endif
+
+
+
 
 #include "llvm/ADT/Twine.h"
 #include "llvm/IR/DataLayout.h"

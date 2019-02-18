@@ -1412,7 +1412,7 @@ void Executor::executeCall(ExecutionState &state,
   } else {
     // Check if maximum stack size was reached.
     // We currently only count the number of stack frames
-    if (RuntimeMaxStackFrames && state.stack.size() > RuntimeMaxStackFrames) {
+    if (RuntimeMaxStackFrames && state.stack().size() > RuntimeMaxStackFrames) {
       terminateStateEarly(state, "Maximum stack size reached.");
       klee_warning("Maximum stack size reached.");
       return;
@@ -3371,7 +3371,7 @@ void Executor::callExternalFunction(ExecutionState &state,
       if (i != arguments.size()-1)
         os << ", ";
     }
-    os << ") at " << state.pc->getSourceLocation();
+    os << ") at " << state.pc()->getSourceLocation();
     
     if (AllExternalWarnings)
       klee_warning("%s", os.str().c_str());
@@ -4353,9 +4353,8 @@ void Executor::executeThreadNotifyOne(ExecutionState &state,
 }
 
 KFunction* Executor::resolveFunction(ref<Expr> address) {
-  for (std::vector<KFunction*>::iterator fi = kmodule->functions.begin();
-       fi != kmodule->functions.end(); fi++) {
-    KFunction* f = (*fi);
+  for (auto &fi : kmodule->functions) {
+    KFunction* f = fi.get();
     ref<Expr> addr = Expr::createPointer((uint64_t) (void*) f->function);
     if (addr == address)
       return f;

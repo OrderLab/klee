@@ -46,7 +46,6 @@ namespace {
 }
 
 ExecutionState::ExecutionState(KFunction *kf) :
-    queryCost(0.),
     weight(1),
     depth(0),
 
@@ -62,7 +61,7 @@ ExecutionState::ExecutionState(KFunction *kf) :
 }
 
 ExecutionState::ExecutionState(const std::vector<ref<Expr> > &assumptions)
-  : constraints(assumptions), queryCost(0.), ptreeNode(0),
+  : constraints(assumptions),  ptreeNode(0),
     wlistCounter(1), preemptions(0) {
   setupMain(NULL);
   stateTime = TimeSeed;
@@ -118,7 +117,7 @@ ExecutionState::ExecutionState(const ExecutionState& state):
     arrayNames(state.arrayNames),
 
     openMergeStack(state.openMergeStack),
-    steppedInstructions(state.steppedInstructions)
+    steppedInstructions(state.steppedInstructions),
 
 
     stateTime(state.stateTime),

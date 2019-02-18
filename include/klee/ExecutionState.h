@@ -82,7 +82,7 @@ public:
   /// Statistics and information
 
   /// @brief Costs for all queries issued for this state, in seconds
-  mutable double queryCost;
+  mutable time::Span queryCost;
 
   /// @brief Weight assigned for importance of this state.  Can be
   /// used for searchers to decide what paths to explore

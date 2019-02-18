@@ -498,7 +498,7 @@ private:
   void initTimers();
 
   void processTimers(ExecutionState *current,
-                     double maxInstTime);
+                     time::Span maxInstTime);
 
   KFunction* resolveFunction(ref<Expr> address);
 
