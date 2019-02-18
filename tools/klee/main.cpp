@@ -1,5 +1,8 @@
 /* -*- mode: c++; c-basic-offset: 2; -*- */
 
+// FIXME: This does not belong here.
+//#include "../lib/Core/Common.h"
+#include "../lib/Module/Passes.h"
 //===-- main.cpp ------------------------------------------------*- C++ -*-===//
 //
 //                     The KLEE Symbolic Virtual Machine
@@ -50,6 +53,9 @@
 #else
 #include <llvm/Bitcode/ReaderWriter.h>
 #endif
+
+#include "llvm/PassManager.h"
+
 
 #include <dirent.h>
 #include <signal.h>
@@ -493,6 +499,10 @@ void KleeHandler::processTestCase(const ExecutionState &state,
         std::copy(out[i].second.begin(), out[i].second.end(), o->bytes);
       }
 
+      b.numSchedSteps = state.schedulingHistory.size();
+      b.schedSteps = new long unsigned[b.numSchedSteps];
+      std::copy(state.schedulingHistory.begin(),state.schedulingHistory.end(),b.schedSteps);
+
       if (!kTest_toFile(&b, getOutputFilename(getTestFilename("ktest", id)).c_str())) {
         klee_warning("unable to write output test case, losing it");
       } else {
@@ -760,11 +770,12 @@ static const char *modelledExternals[] = {
   "klee_get_value_i32",
   "klee_get_value_i64",
   "klee_get_obj_size",
-  "klee_is_symbolic",
-  "klee_make_symbolic",
-  "klee_mark_global",
   "klee_open_merge",
   "klee_close_merge",
+  "klee_get_wlist",
+  "klee_is_symbolic", 
+  "klee_make_symbolic", 
+  "klee_mark_global",
   "klee_prefer_cex",
   "klee_posix_prefer_cex",
   "klee_print_expr",
@@ -776,6 +787,14 @@ static const char *modelledExternals[] = {
   "klee_warning_once",
   "klee_alias_function",
   "klee_stack_trace",
+  "klee_thread_create",
+  "klee_thread_notify",
+  "klee_thread_preempt",
+  "klee_thread_sleep",
+  "klee_thread_terminate",
+  "klee_get_time",
+  "klee_set_time",
+#if LLVM_VERSION_CODE >= LLVM_VERSION(3, 1)
   "llvm.dbg.declare",
   "llvm.dbg.value",
   "llvm.va_start",
@@ -1258,10 +1277,23 @@ int main(int argc, char **argv, char **envp) {
                  errorMsg.c_str());
     break;
   }
+
   case LibcType::UcLibc:
     linkWithUclibc(LibraryDir, loadedModules);
     break;
   }
+
+  if (WithPOSIXRuntime) {
+    SmallString<128> Path(Opts.LibraryDir);
+    llvm::sys::path::append(Path, "libkleeRuntimePOSIX.bca");
+    klee_message("NOTE: Using model: %s", Path.c_str());
+    mainModule = klee::linkWithLibrary(mainModule, Path.c_str());
+    assert(mainModule && "unable to link with simple model");
+
+    PassManager pm;
+    pm.add(new ThreadPreemptionPass());
+    pm.run(*mainModule);
+  }  
 
   for (const auto &library : LinkLibraries) {
     if (!klee::loadFile(library, mainModule->getContext(), loadedModules,

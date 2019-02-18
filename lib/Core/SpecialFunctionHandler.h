@@ -10,6 +10,8 @@
 #ifndef KLEE_SPECIALFUNCTIONHANDLER_H
 #define KLEE_SPECIALFUNCTIONHANDLER_H
 
+#include "klee/Expr.h"
+
 #include <iterator>
 #include <map>
 #include <vector>
@@ -94,6 +96,8 @@ namespace klee {
     /* Convenience routines */
 
     std::string readStringAtAddress(ExecutionState &state, ref<Expr> address);
+   
+    bool writeConcreteValue(ExecutionState &state, ref<Expr> address, uint64_t value, Expr::Width width);
     
     /* Handlers */
 
@@ -113,9 +117,11 @@ namespace klee {
     HANDLER(handleErrnoLocation);
     HANDLER(handleAliasFunction);
     HANDLER(handleFree);
+    HANDLER(handleGetContext);
     HANDLER(handleGetErrno);
     HANDLER(handleGetObjSize);
     HANDLER(handleGetValue);
+    HANDLER(handleGetWList);
     HANDLER(handleIsSymbolic);
     HANDLER(handleMakeSymbolic);
     HANDLER(handleMalloc);
@@ -136,6 +142,11 @@ namespace klee {
     HANDLER(handleSetForking);
     HANDLER(handleSilentExit);
     HANDLER(handleStackTrace);
+    HANDLER(handleThreadCreate);
+    HANDLER(handleThreadNotify);
+    HANDLER(handleThreadPreempt);
+    HANDLER(handleThreadSleep);
+    HANDLER(handleThreadTerminate);
     HANDLER(handleUnderConstrained);
     HANDLER(handleWarning);
     HANDLER(handleWarningOnce);
@@ -143,6 +154,8 @@ namespace klee {
     HANDLER(handleMulOverflow);
     HANDLER(handleSubOverflow);
     HANDLER(handleDivRemOverflow);
+    HANDLER(handleGetTime);
+    HANDLER(handleSetTime);
 #undef HANDLER
   };
 } // End klee namespace

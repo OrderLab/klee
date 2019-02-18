@@ -20,6 +20,7 @@ env:
     # configuration.
     ###########################################################################
 
+
     # Check a subset of the matrix of:
     #   LLVM  : {3.4, 3.5, 3.6, 3.7, 3.8, 3.9, 4.0, 5.0, 6.0, 7}
     #   SOLVERS : {Z3, STP, STP:Z3, metaSMT}
@@ -36,6 +37,7 @@ env:
     # COVERAGE when set indicates that coverage data should be uploaded to the service
 
     matrix:
+
 
     # TODO: Add Doxygen build
 
@@ -70,6 +72,7 @@ env:
 
     # Check at least one build with Asserts disabled.
     - LLVM_VERSION=3.4 SOLVERS=STP STP_VERSION=2.1.2 KLEE_UCLIBC=klee_uclibc_v1.0.0 DISABLE_ASSERTIONS=1 ENABLE_OPTIMIZED=1 COVERAGE=0
+
 
     # Check at least one Debug+Asserts build
     - LLVM_VERSION=3.4 SOLVERS=STP STP_VERSION=2.1.2 KLEE_UCLIBC=klee_uclibc_v1.0.0 DISABLE_ASSERTIONS=0 ENABLE_OPTIMIZED=0 COVERAGE=0

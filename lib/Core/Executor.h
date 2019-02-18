@@ -26,7 +26,13 @@
 
 #include "llvm/ADT/Twine.h"
 
+
 #include "../Expr/ArrayExprOptimizer.h"
+#include "Thread.h"
+
+#include <vector>
+#include <string>
+
 #include <map>
 #include <memory>
 #include <set>
@@ -195,6 +201,9 @@ private:
   /// The index into the current \ref replayKTest or \ref replayPath
   /// object.
   unsigned replayPosition;
+  /// The index into the current \ref replayOut->schedSteps
+  /// object.
+  unsigned replaySched;
 
   /// When non-null a list of "seed" inputs which will be used to
   /// drive execution.
@@ -351,6 +360,9 @@ private:
   // current state, and one of the states may be null.
   StatePair fork(ExecutionState &current, ref<Expr> condition, bool isInternal);
 
+  // Clone the given state, the second state is the given one, the first is the copy.
+  StatePair fork(ExecutionState &current);
+
   /// Add the given (boolean) condition as a constraint on state. This
   /// function is a wrapper around the state's addConstraint function
   /// which also manages propagation of implied values,
@@ -367,12 +379,16 @@ private:
   Cell& getArgumentCell(ExecutionState &state,
                         KFunction *kf,
                         unsigned index) {
-    return state.stack.back().locals[kf->getArgRegister(index)];
+    return state.stack().back().locals[kf->getArgRegister(index)];
+  }
+
+  Cell& getArgumentCell(StackFrame &sf, KFunction *kf, unsigned index) {
+    return sf.locals[kf->getArgRegister(index)];
   }
 
   Cell& getDestCell(ExecutionState &state,
                     KInstruction *target) {
-    return state.stack.back().locals[target->dest];
+    return state.stack().back().locals[target->dest];
   }
 
   void bindLocal(KInstruction *target, 
@@ -394,6 +410,13 @@ private:
   /// not applicable/unavailable.
   ref<klee::ConstantExpr> evalConstant(const llvm::Constant *c,
 				       const KInstruction *ki = NULL);
+
+  void bindArgumentThreadCreate(KFunction *kf,
+                                unsigned index,
+                                StackFrame &sf,
+                                ref<Expr> value);
+
+
 
   /// Return a unique constant value for the given expression in the
   /// given state, if it has one (i.e. it provably only has a single
@@ -473,7 +496,12 @@ private:
   void addTimer(Timer *timer, time::Span rate);
 
   void initTimers();
-  void processTimers(ExecutionState *current, time::Span maxInstTime);
+
+  void processTimers(ExecutionState *current,
+                     double maxInstTime);
+
+  KFunction* resolveFunction(ref<Expr> address);
+
   void checkMemoryUsage();
   void printDebugInstructions(ExecutionState &state);
   void doDumpStates();
@@ -497,6 +525,7 @@ public:
     assert(!replayPath && "cannot replay both buffer and path");
     replayKTest = out;
     replayPosition = 0;
+    replaySched = 0;
   }
 
   void setReplayPath(const std::vector<bool> *path) override {
@@ -545,8 +574,25 @@ public:
   Expr::Width getWidthForLLVMType(llvm::Type *type) const;
   size_t getAllocationAlignment(const llvm::Value *allocSite) const;
 
+
   /// Returns the errno location in memory of the state
   int *getErrnoLocation(const ExecutionState &state) const;
+
+  /*** Multithread methods ***/
+
+  // Create a new thread in the state
+  void executeThreadCreate(ExecutionState &state, Thread::thread_id_t tid,
+                           ref<Expr> start_function, ref<Expr> arg);
+
+  // Terminate current thread on the state
+  void executeThreadExit(ExecutionState &state);
+
+  // Schedule next thread. If yield is true the current thread cannot be rescheduled
+  bool schedule(ExecutionState &state, bool yield, bool terminateThread);
+
+  // Enable and schedule a thread in the waiting list
+  void executeThreadNotifyOne(ExecutionState &state, Thread::wlist_id_t wlist);
+
 };
   
 } // End klee namespace

@@ -62,17 +62,23 @@ class KTest:
             bytes = f.read(size)
             objects.append((name, bytes))
 
+        numSchedSteps, = struct.unpack('>i', f.read(4))
+        schedSteps = []
+        for i in range(numSchedSteps):
+            schedSteps.append(struct.unpack('>Q',f.read(8))[0])
         # Create an instance
         b = KTest(version, path, args, symArgvs, symArgvLen, objects)
         return b
 
     def __init__(self, version, path, args, symArgvs, symArgvLen, objects):
+
         self.version = version
         self.path = path
         self.symArgvs = symArgvs
         self.symArgvLen = symArgvLen
         self.args = args
         self.objects = objects
+        self.schedSteps = schedSteps
 
     def __format__(self, format_spec):
         sio = io.StringIO()

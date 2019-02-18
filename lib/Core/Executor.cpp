@@ -22,6 +22,7 @@
 #include "TimingSolver.h"
 #include "UserSearcher.h"
 #include "ExecutorTimerInfo.h"
+#include "Thread.h"
 
 
 #include "klee/ExecutionState.h"
@@ -371,6 +372,37 @@ namespace {
                              cl::init(false),
                              cl::desc("Debug the implied value optimization"),
                              cl::cat(DebugCat));
+
+
+  cl::opt<bool>
+  DebugSchedulingHistory("debug-sched-history",
+            cl::desc("Print scheduling history during execution."),
+            cl::init(false));
+
+  cl::opt<bool>
+  DebugExploredSchedules("debug-sched-explored",
+            cl::desc("Print explored schedules during state termination."),
+            cl::init(false));
+
+  cl::opt<bool>
+  ForkOnSchedule("fork-on-schedule",
+            cl::desc("Fork when various schedules are possible (defaul=disabled)"),
+            cl::init(false));
+
+  cl::opt<unsigned>
+  MaxPreemptions("scheduler-preemption-bound",
+            cl::desc("Scheduler preemption bound (default=0)"),
+            cl::init(0));
+
+  cl::opt<bool>
+  NoMaxPreemptions("no-scheduler-bound",
+            cl::desc("Do not bound the number of preemptions in the schedule (default=off)"),
+            cl::init(false));
+
+  cl::opt<bool>
+  AllowPartialScheduling("allow-partial-scheduling",
+            cl::desc("Allow to continue exploring interleavings after the total number of replay scheduling steps (--replay-out) have been consumed (default=off)"),
+            cl::init(false));
 
 }
 
@@ -846,7 +878,7 @@ void Executor::branch(ExecutionState &state,
       addConstraint(*result[i], conditions[i]);
 }
 
-Executor::StatePair 
+Executor::StatePair
 Executor::fork(ExecutionState &current, ref<Expr> condition, bool isInternal) {
   Solver::Validity res;
   std::map< ExecutionState*, std::vector<SeedInfo> >::iterator it = 
@@ -858,7 +890,7 @@ Executor::fork(ExecutionState &current, ref<Expr> condition, bool isInternal) {
        MaxStaticCPForkPct!=1. || MaxStaticCPSolvePct != 1.) &&
       statsTracker->elapsed() > time::seconds(60)) {
     StatisticManager &sm = *theStatisticManager;
-    CallPathNode *cpn = current.stack.back().callPathNode;
+    CallPathNode *cpn = current.stack().back().callPathNode;
     if ((MaxStaticForkPct<1. &&
          sm.getIndexedValue(stats::forks, sm.getIndex()) > 
          stats::forks*MaxStaticForkPct) ||
@@ -887,7 +919,7 @@ Executor::fork(ExecutionState &current, ref<Expr> condition, bool isInternal) {
   bool success = solver->evaluate(current, condition, res);
   solver->setTimeout(time::Span());
   if (!success) {
-    current.pc = current.prevPC;
+    current.pc() = current.prevPC();
     terminateStateEarly(current, "Query timed out (fork).");
     return StatePair(0, 0);
   }
@@ -1075,6 +1107,24 @@ Executor::fork(ExecutionState &current, ref<Expr> condition, bool isInternal) {
   }
 }
 
+Executor::StatePair Executor::fork(ExecutionState &current) {
+  ExecutionState *lastState = &current;
+
+  ExecutionState *newState = lastState->branch();
+
+  addedStates.push_back(newState);
+
+  if (lastState->ptreeNode) {
+    lastState->ptreeNode->data = 0;
+    std::pair<PTree::Node*,PTree::Node*> res =
+        processTree->split(lastState->ptreeNode, newState, lastState);
+    newState->ptreeNode = res.first;
+    lastState->ptreeNode = res.second;
+  }
+
+  return StatePair(newState, lastState);
+}
+
 void Executor::addConstraint(ExecutionState &state, ref<Expr> condition) {
   if (ConstantExpr *CE = dyn_cast<ConstantExpr>(condition)) {
     if (!CE->isTrue())
@@ -1123,7 +1173,7 @@ const Cell& Executor::eval(KInstruction *ki, unsigned index,
     return kmodule->constantTable[index];
   } else {
     unsigned index = vnumber;
-    StackFrame &sf = state.stack.back();
+    StackFrame &sf = state.stack().back();
     return sf.locals[index];
   }
 }
@@ -1178,8 +1228,8 @@ Executor::toConstant(ExecutionState &state,
   std::string str;
   llvm::raw_string_ostream os(str);
   os << "silently concretizing (reason: " << reason << ") expression " << e
-     << " to value " << value << " (" << (*(state.pc)).info->file << ":"
-     << (*(state.pc)).info->line << ")";
+     << " to value " << value << " (" << (*(state.pc())).info->file << ":"
+     << (*(state.pc())).info->line << ")";
 
   if (AllExternalWarnings)
     klee_warning("%s", os.str().c_str());
@@ -1251,14 +1301,15 @@ void Executor::printDebugInstructions(ExecutionState &state) {
 
   if (!DebugPrintInstructions.isSet(STDERR_COMPACT) &&
       !DebugPrintInstructions.isSet(FILE_COMPACT)) {
-    (*stream) << "     " << state.pc->getSourceLocation() << ":";
+    (*stream) << "     " << state.pc()->getSourceLocation() << ":";
   }
 
-  (*stream) << state.pc->info->assemblyLine;
+  (*stream) << state.pc()->info->assemblyLine;
 
   if (DebugPrintInstructions.isSet(STDERR_ALL) ||
       DebugPrintInstructions.isSet(FILE_ALL))
-    (*stream) << ":" << *(state.pc->inst);
+    (*stream) << ":" << *(state.pc()->inst);
+
   (*stream) << "\n";
 
   if (DebugPrintInstructions.isSet(FILE_ALL) ||
@@ -1272,13 +1323,17 @@ void Executor::printDebugInstructions(ExecutionState &state) {
 
 void Executor::stepInstruction(ExecutionState &state) {
   printDebugInstructions(state);
+  
   if (statsTracker)
     statsTracker->stepInstruction(state);
 
   ++stats::instructions;
+
   ++state.steppedInstructions;
-  state.prevPC = state.pc;
-  ++state.pc;
+  state.prevPC() = state.pc();
+  ++state.pc();
+
+  state.stateTime++; // Assume all instructions take 1 unit time (1 usec)
 
   if (stats::instructions == MaxInstructions)
     haltExecution = true;
@@ -1288,8 +1343,10 @@ void Executor::executeCall(ExecutionState &state,
                            KInstruction *ki,
                            Function *f,
                            std::vector< ref<Expr> > &arguments) {
-  Instruction *i = ki->inst;
-  if (f && f->isDeclaration()) {
+  Instruction *i = NULL;
+  if (ki)
+    i = ki->inst;
+  if (ki && f && f->isDeclaration()) {
     switch(f->getIntrinsicID()) {
     case Intrinsic::not_intrinsic:
       // state may be destroyed by this call, cannot touch
@@ -1299,7 +1356,7 @@ void Executor::executeCall(ExecutionState &state,
       // va_arg is handled by caller and intrinsic lowering, see comment for
       // ExecutionState::varargs
     case Intrinsic::vastart:  {
-      StackFrame &sf = state.stack.back();
+      StackFrame &sf = state.stack().back();
 
       // varargs can be zero if no varargs were provided
       if (!sf.varargs)
@@ -1367,12 +1424,12 @@ void Executor::executeCall(ExecutionState &state,
     // from just an instruction (unlike LLVM).
     KFunction *kf = kmodule->functionMap[f];
 
-    state.pushFrame(state.prevPC, kf);
-    state.pc = kf->instructions;
+    state.pushFrame(state.prevPC(), kf);
+    state.pc() = kf->instructions;
 
     if (statsTracker)
-      statsTracker->framePushed(state, &state.stack[state.stack.size()-2]);
-
+      statsTracker->framePushed(state, &state.stack()[state.stack().size()-2]);
+ 
      // TODO: support "byval" parameter attribute
      // TODO: support zeroext, signext, sret attributes
 
@@ -1395,8 +1452,8 @@ void Executor::executeCall(ExecutionState &state,
                               User);
         return;
       }
-
-      StackFrame &sf = state.stack.back();
+            
+      StackFrame &sf = state.stack().back();
       unsigned size = 0;
       bool requires16ByteAlignment = false;
       for (unsigned i = funcArgs; i < callingArgs; i++) {
@@ -1427,9 +1484,8 @@ void Executor::executeCall(ExecutionState &state,
         }
       }
 
-      MemoryObject *mo = sf.varargs =
-          memory->allocate(size, true, false, state.prevPC->inst,
-                           (requires16ByteAlignment ? 16 : 8));
+      MemoryObject *mo = sf.varargs = memory->allocate(size, true, false, 
+                                     state.prevPC()->inst, (requires16ByteAlignment ? 16 : 8));
       if (!mo && size) {
         terminateStateOnExecError(state, "out of memory (varargs)");
         return;
@@ -1494,12 +1550,12 @@ void Executor::transferToBasicBlock(BasicBlock *dst, BasicBlock *src,
   // instructions know which argument to eval, set the pc, and continue.
   
   // XXX this lookup has to go ?
-  KFunction *kf = state.stack.back().kf;
+  KFunction *kf = state.stack().back().kf;
   unsigned entry = kf->basicBlockEntry[dst];
-  state.pc = &kf->instructions[entry];
-  if (state.pc->inst->getOpcode() == Instruction::PHI) {
-    PHINode *first = static_cast<PHINode*>(state.pc->inst);
-    state.incomingBBIndex = first->getBasicBlockIndex(src);
+  state.pc() = &kf->instructions[entry];
+  if (state.pc()->inst->getOpcode() == Instruction::PHI) {
+    PHINode *first = static_cast<PHINode*>(state.pc()->inst);
+    state.incomingBBIndex(first->getBasicBlockIndex(src));
   }
 }
 
@@ -1580,7 +1636,7 @@ void Executor::executeInstruction(ExecutionState &state, KInstruction *ki) {
     // Control flow
   case Instruction::Ret: {
     ReturnInst *ri = cast<ReturnInst>(i);
-    KInstIterator kcaller = state.stack.back().caller;
+    KInstIterator kcaller = state.stack().back().caller;
     Instruction *caller = kcaller ? kcaller->inst : 0;
     bool isVoidReturn = (ri->getNumOperands() == 0);
     ref<Expr> result = ConstantExpr::alloc(0, Expr::Bool);
@@ -1589,9 +1645,18 @@ void Executor::executeInstruction(ExecutionState &state, KInstruction *ki) {
       result = eval(ki, 0, state).value;
     }
     
-    if (state.stack.size() <= 1) {
+    if (state.stack().size() <= 1) {
       assert(!caller && "caller set on initial stack frame");
-      terminateStateOnExit(state);
+      if (state.threads.size() == 1) {
+        //main exit
+        terminateStateOnExit(state);
+      } else {
+        // Invoke pthread_exit()
+        Function *f = kmodule->module->getFunction("pthread_exit");
+        std::vector<ref<Expr> > arguments;
+        arguments.push_back(result);
+        executeCall(state, NULL, f, arguments);
+      }
     } else {
       state.popFrame();
 
@@ -1601,8 +1666,8 @@ void Executor::executeInstruction(ExecutionState &state, KInstruction *ki) {
       if (InvokeInst *ii = dyn_cast<InvokeInst>(caller)) {
         transferToBasicBlock(ii->getNormalDest(), caller->getParent(), state);
       } else {
-        state.pc = kcaller;
-        ++state.pc;
+        state.pc() = kcaller;
+        ++state.pc();
       }
 
       if (!isVoidReturn) {
@@ -1642,6 +1707,31 @@ void Executor::executeInstruction(ExecutionState &state, KInstruction *ki) {
     }      
     break;
   }
+
+#if LLVM_VERSION_CODE < LLVM_VERSION(3, 1)
+  case Instruction::Unwind: {
+    for (;;) {
+      KInstruction *kcaller = state.stack().back().caller;
+      state.popFrame();
+
+      if (statsTracker)
+        statsTracker->framePopped(state);
+
+      if (state.stack().empty()) {
+        terminateStateOnExecError(state, "unwind from initial stack frame");
+        break;
+      } else {
+        Instruction *caller = kcaller->inst;
+        if (InvokeInst *ii = dyn_cast<InvokeInst>(caller)) {
+          transferToBasicBlock(ii->getUnwindDest(), caller->getParent(), state);
+          break;
+        }
+      }
+    }
+    break;
+  }
+#endif
+
   case Instruction::Br: {
     BranchInst *bi = cast<BranchInst>(i);
     if (bi->isUnconditional()) {
@@ -1659,7 +1749,7 @@ void Executor::executeInstruction(ExecutionState &state, KInstruction *ki) {
       // requires that we still be in the context of the branch
       // instruction (it reuses its statistic id). Should be cleaned
       // up with convenient instruction specific data.
-      if (statsTracker && state.stack.back().kf->trackCoverage)
+      if (statsTracker && state.stack().back().kf->trackCoverage)
         statsTracker->markBranchVisited(branches.first, branches.second);
 
       if (branches.first)
@@ -1980,7 +2070,11 @@ void Executor::executeInstruction(ExecutionState &state, KInstruction *ki) {
     break;
   }
   case Instruction::PHI: {
-    ref<Expr> result = eval(ki, state.incomingBBIndex, state).value;
+#if LLVM_VERSION_CODE >= LLVM_VERSION(3, 0)
+    ref<Expr> result = eval(ki, state.incomingBBIndex(), state).value;
+#else
+    ref<Expr> result = eval(ki, state.incomingBBIndex() * 2, state).value;
+#endif
     bindLocal(ki, state, result);
     break;
   }
@@ -2875,7 +2969,7 @@ void Executor::run(ExecutionState &initialState) {
       lastState = it->first;
       unsigned numSeeds = it->second.size();
       ExecutionState &state = *lastState;
-      KInstruction *ki = state.pc;
+      KInstruction *ki = state.pc();
       stepInstruction(state);
 
       executeInstruction(state, ki);
@@ -2929,7 +3023,7 @@ void Executor::run(ExecutionState &initialState) {
 
   while (!states.empty() && !haltExecution) {
     ExecutionState &state = searcher->selectState();
-    KInstruction *ki = state.pc;
+    KInstruction *ki = state.pc();
     stepInstruction(state);
 
     executeInstruction(state, ki);
@@ -3026,12 +3120,26 @@ void Executor::terminateState(ExecutionState &state) {
                       "replay did not consume all objects in test input.");
   }
 
+  if (replayKTest && replaySched < replayKTest->numSchedSteps) {
+    klee_warning_once(replayKTest,
+                      "replay did not consume all scheduling steps in test input");
+  }
+
   interpreterHandler->incPathsExplored();
+
+  if (DebugExploredSchedules && (state.schedulingHistory.size() > 0)) {
+    std::string Str;
+    llvm::raw_string_ostream msg(Str);
+    msg << "Explored schedule: ";
+    for (std::vector<Thread::thread_id_t>::iterator it = state.schedulingHistory.begin(); it != state.schedulingHistory.end(); ++it)
+       msg << *it << ' ';
+    klee_message("%s", msg.str().c_str());
+  }
 
   std::vector<ExecutionState *>::iterator it =
       std::find(addedStates.begin(), addedStates.end(), &state);
   if (it==addedStates.end()) {
-    state.pc = state.prevPC;
+    state.pc() = state.prevPC();
 
     removedStates.push_back(&state);
   } else {
@@ -3066,16 +3174,16 @@ const InstructionInfo & Executor::getLastNonKleeInternalInstruction(const Execut
     Instruction ** lastInstruction) {
   // unroll the stack of the applications state and find
   // the last instruction which is not inside a KLEE internal function
-  ExecutionState::stack_ty::const_reverse_iterator it = state.stack.rbegin(),
-      itE = state.stack.rend();
+  Thread::stack_ty::const_reverse_iterator it = state.stack().rbegin(),
+      itE = state.stack().rend();
 
   // don't check beyond the outermost function (i.e. main())
   itE--;
 
   const InstructionInfo * ii = 0;
   if (kmodule->internalFunctions.count(it->kf->function) == 0){
-    ii =  state.prevPC->info;
-    *lastInstruction = state.prevPC->inst;
+    ii =  state.prevPC()->info;
+    *lastInstruction = state.prevPC()->inst;
     //  Cannot return yet because even though
     //  it->function is not an internal function it might of
     //  been called from an internal function.
@@ -3099,8 +3207,8 @@ const InstructionInfo & Executor::getLastNonKleeInternalInstruction(const Execut
 
   if (!ii) {
     // something went wrong, play safe and return the current instruction info
-    *lastInstruction = state.prevPC->inst;
-    return *state.prevPC->info;
+    *lastInstruction = state.prevPC()->inst;
+    return *state.prevPC()->info;
   }
   return *ii;
 }
@@ -3340,7 +3448,7 @@ ObjectState *Executor::bindObjectInState(ExecutionState &state,
   // matter because all we use this list for is to unbind the object
   // on function return.
   if (isLocal)
-    state.stack.back().allocas.push_back(mo);
+    state.stack().back().allocas.push_back(mo);
 
   return os;
 }
@@ -3354,13 +3462,15 @@ void Executor::executeAlloc(ExecutionState &state,
                             size_t allocationAlignment) {
   size = toUnique(state, size);
   if (ConstantExpr *CE = dyn_cast<ConstantExpr>(size)) {
-    const llvm::Value *allocSite = state.prevPC->inst;
+
+    const llvm::Value *allocSite = state.prevPC()->inst;
     if (allocationAlignment == 0) {
       allocationAlignment = getAllocationAlignment(allocSite);
     }
-    MemoryObject *mo =
-        memory->allocate(CE->getZExtValue(), isLocal, /*isGlobal=*/false,
-                         allocSite, allocationAlignment);
+
+    MemoryObject *mo = memory->allocate(CE->getZExtValue(), isLocal, false,
+                                        allocSite, allocationAlignment);
+
     if (!mo) {
       bindLocal(target, state, 
                 ConstantExpr::alloc(0, Context::get().getPointerWidth()));
@@ -3566,7 +3676,7 @@ void Executor::executeMemoryOperation(ExecutionState &state,
     bool success = solver->mustBeTrue(state, check, inBounds);
     solver->setTimeout(time::Span());
     if (!success) {
-      state.pc = state.prevPC;
+      state.pc() = state.prevPC();
       terminateStateEarly(state, "Query timed out (bounds check).");
       return;
     }
@@ -3800,7 +3910,8 @@ void Executor::runFunctionAsMain(Function *f,
 
         MemoryObject *arg =
             memory->allocate(len + 1, /*isLocal=*/false, /*isGlobal=*/true,
-                             /*allocSite=*/state->pc->inst, /*alignment=*/8);
+                             /*allocSite=*/state->pc()->inst, /*alignment=*/8);
+
         if (!arg)
           klee_error("Could not allocate memory for function arguments");
         ObjectState *os = bindObjectInState(*state, arg, false);
@@ -4051,13 +4162,212 @@ void Executor::prepareForEarlyExit() {
 /// Returns the errno location in memory
 int *Executor::getErrnoLocation(const ExecutionState &state) const {
 #ifndef __APPLE__
-  /* From /usr/include/errno.h: it [errno] is a per-thread variable. */
-  return __errno_location();
+    /* From /usr/include/errno.h: it [errno] is a per-thread variable. */
+    return __errno_location();
 #else
-  return __error();
+    return __error();
 #endif
 }
 
+bool Executor::schedule(ExecutionState &state, bool yield, bool terminateThread) {
+  if (state.enabledThreadIds().empty()) {
+    terminateStateOnError(state, " ******** hang (possible deadlock?)", User);
+    return false;
+  }
+
+  bool forkSchedule = false;
+  bool incPreemptions = false;
+  ExecutionState::threads_ty::iterator oldIt = state.crtThreadIt;
+  Thread::thread_id_t oldTid = oldIt->second.tid;
+
+  bool scheduled = false;
+  if (replayKTest) {
+    if (!AllowPartialScheduling && (replaySched >= replayKTest->numSchedSteps)) {
+      terminateStateOnError(state, "replay sched count mismatch", User);
+      return false;
+    } else if (replaySched < replayKTest->numSchedSteps) {
+      unsigned long nextTid = replayKTest->schedSteps[replaySched];
+      klee_message("replay next tid %lu", nextTid);
+      if (oldTid == nextTid) {
+        state.schedulingHistory.push_back(oldTid); // The current thread stays as current
+      } else {
+        ExecutionState::threads_ty::iterator finalIt = state.crtThreadIt;
+        ExecutionState::threads_ty::iterator it = state.nextThread(finalIt);
+        while ((it != finalIt) && (it->second.tid != nextTid))
+          it = state.nextThread(it);
+
+        if (it == finalIt) {
+          terminateStateOnError(state, "replay next thread not found", User);
+          return false;
+        } else if (!it->second.enabled) {
+          terminateStateOnError(state, "replay next thread is not enabled", User);
+          return false;
+        }
+        state.scheduleNext(it);
+      }
+      replaySched++;
+      scheduled = true;
+    } else if (replaySched == replayKTest->numSchedSteps) {
+      klee_message("replay scheduling steps exhausted, start default scheduling");
+      replaySched++;
+    }
+  }
+
+  if (!scheduled) {
+    if (!state.crtThread().enabled || yield) {
+      ExecutionState::threads_ty::iterator it = state.nextThread(state.crtThreadIt);
+
+      while (!it->second.enabled)
+        it = state.nextThread(it);
+
+      state.scheduleNext(it);
+
+      if (ForkOnSchedule)
+         forkSchedule = true;
+    } else {
+      state.schedulingHistory.push_back(oldTid); // The current thread stays as current
+      if (NoMaxPreemptions || state.preemptions < MaxPreemptions) {
+        forkSchedule = true;
+        incPreemptions = true;
+      }
+    }
+  }
+
+  if (terminateThread)
+    state.terminateThread(oldIt);
+
+  if (DebugSchedulingHistory) {
+    unsigned int depth = state.stack().size() - 1;
+    std::string Str;
+    llvm::raw_string_ostream msg(Str);
+    msg << "Context Switch: " << oldTid <<" -> " << state.crtThread().tid << " "
+        << "Call: " << std::string(depth, ' ')
+        << state.stack().back().kf->function->getName().str();
+    klee_message("%s", msg.str().c_str());
+  }
+
+  if (forkSchedule) {
+    ExecutionState::threads_ty::iterator finalIt = state.crtThreadIt;
+    ExecutionState::threads_ty::iterator it = state.nextThread(finalIt);
+    ExecutionState *lastState = &state;
+    while (it != finalIt) {
+      // Choose only enabled states, and, in the case of yielding, do not
+      // reschedule the same thread
+      if (it->second.enabled && (!yield || it->second.tid != oldTid)) {
+        StatePair sp = fork(*lastState);
+
+        if (incPreemptions)
+          sp.first->preemptions = state.preemptions + 1;
+
+        sp.first->schedulingHistory.pop_back();
+        //The last sched step has been introduced automatically but
+        // do not refer to the original thread, at the beginning of the method
+        sp.first->scheduleNext(sp.first->threads.find(it->second.tid));
+
+        if (DebugSchedulingHistory) {
+          unsigned int depth = sp.first->stack().size() - 1;
+          std::string Str;
+          llvm::raw_string_ostream msg(Str);
+          msg << "                " << oldTid << " -> "
+              << sp.first->crtThread().tid << " "
+              << "Call: " << std::string(depth, ' ')
+              << sp.first->stack().back().kf->function->getName().str()
+              <<" -- Fork";
+          klee_message("%s", msg.str().c_str());
+        }
+
+        lastState = sp.first;
+      }
+
+      it = state.nextThread(it);
+    }
+  }
+  return true;
+}
+
+void Executor::executeThreadCreate(ExecutionState &state, Thread::thread_id_t tid,
+                                   ref<Expr> start_function, ref<Expr> arg) {
+  KFunction *kf = resolveFunction(start_function);
+  assert(kf && "cannot resolve thread start function");
+
+  std::string Str;
+  llvm::raw_string_ostream msg(Str);
+  msg << "Creating thread: " << tid  << " Function: "
+      << kf->function->getName().str() << " Parent: " << state.crtThreadIt->second.tid;
+  klee_message("%s", msg.str().c_str());
+
+  Thread &t = state.createThread(tid, kf);
+
+  bindArgumentThreadCreate(kf, 0, t.stack.back(), arg);
+
+  if (statsTracker)
+    statsTracker->framePushed(&t.stack.back(), 0);
+}
+
+void Executor::executeThreadExit(ExecutionState &state) {
+  //terminate this thread and schedule another one
+  klee_message("Exiting thread: %lu", state.crtThreadIt->second.tid);
+
+  if (state.threads.size() == 1) {
+    klee_message("Terminating state");
+    terminateStateOnExit(state);
+    return;
+  }
+
+  assert(state.threads.size() > 1);
+
+  ExecutionState::threads_ty::iterator thrIt = state.crtThreadIt;
+  thrIt->second.enabled = false;
+
+  schedule(state, false, true);
+}
+
+void Executor::executeThreadNotifyOne(ExecutionState &state,
+                                      Thread::wlist_id_t wlist) {
+  // Copy the waiting list
+  std::set<Thread::thread_id_t> wl = state.waitingLists[wlist];
+
+  if (!ForkOnSchedule || wl.size() <= 1) {
+    if (wl.size() == 0)
+      state.waitingLists.erase(wlist);
+    else
+      // Deterministically pick the first thread in the queue
+      state.notifyOne(wlist, *wl.begin());
+    return;
+  }
+
+  ExecutionState *lastState = &state;
+
+  for (std::set<Thread::thread_id_t>::iterator it = wl.begin(); it != wl.end();) {
+    Thread::thread_id_t tid = *it++;
+
+    if (it != wl.end()) {
+      StatePair sp = fork(*lastState);
+
+      sp.second->notifyOne(wlist, tid);
+
+      lastState = sp.first;
+    } else
+      lastState->notifyOne(wlist, tid);
+  }
+}
+
+KFunction* Executor::resolveFunction(ref<Expr> address) {
+  for (std::vector<KFunction*>::iterator fi = kmodule->functions.begin();
+       fi != kmodule->functions.end(); fi++) {
+    KFunction* f = (*fi);
+    ref<Expr> addr = Expr::createPointer((uint64_t) (void*) f->function);
+    if (addr == address)
+      return f;
+  }
+  return NULL;
+}
+
+
+void Executor::bindArgumentThreadCreate(KFunction *kf, unsigned index,
+                                        StackFrame &sf, ref<Expr> value) {
+    getArgumentCell(sf, kf, index).value = value;
+}
 ///
 
 Interpreter *Interpreter::create(LLVMContext &ctx, const InterpreterOptions &opts,
